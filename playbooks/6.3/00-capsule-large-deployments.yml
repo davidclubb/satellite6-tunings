@@ -1,0 +1,21 @@
+- hosts: capsule
+  vars:
+    content_hosts_count: 1000
+  tasks:
+
+    - name: Set qdrouterd nofile limit
+      ini_file:
+        path: /etc/systemd/system/qdrouterd.service.d/limits.conf
+        section: Service
+        option: LimitNOFILE
+        value: "{{ 3 * content_hosts_count + 100 }}"
+      notify:
+        - Reload systemd
+        - Restart katello
+
+
+  handlers:
+    - name: Reload systemd
+      shell: systemctl daemon-reload
+    - name: Restart katello
+      shell: katello-service restart

@@ -1,0 +1,114 @@
+- hosts: satellite
+  vars:
+    puppet: true
+    content_hosts_count: 1000
+  tasks:
+
+    - name: Apache httpd nofile limits
+      ini_file:
+        path: /etc/systemd/system/httpd.service.d/limits.conf
+        section: Service
+        option: LimitNOFILE
+        value: '65536'
+      notify:
+        - Reload systemd
+        - Restart katello
+
+    - name: Qpidd nofile limits
+      ini_file:
+        path: /etc/systemd/system/qpidd.service.d/limits.conf
+        section: Service
+        option: LimitNOFILE
+        value: '65536'
+      notify:
+        - Reload systemd
+        - Restart qpidd
+
+    - name: Set PostgreSQL tunings
+      lineinfile:
+        path: /var/lib/pgsql/data/postgresql.conf
+        line: "{{ item }}"
+        create: true
+        backup: true
+      with_items:
+        - work_mem = 4MB
+        - shared_buffers = 256MB
+        - max_connections = 500
+      notify:
+        - Restart postgresql
+
+    - name: Get system physical core count
+      shell: "grep -E '^processor' /proc/cpuinfo | wc -l"
+      register: cpucorecount
+      check_mode: no
+
+    - name: Calculate passenger pool size
+      set_fact:
+        passengerpoolsize: "{{ (cpucorecount.stdout|float * 1.5)|int+1 }}"
+
+    - name: Set passenger pool size
+      lineinfile:
+        path: /etc/httpd/conf.d/passenger.conf
+        insertafter: '<IfModule mod_passenger.c>'
+        regexp: "^   PassengerMaxPoolSize"
+        line: "   PassengerMaxPoolSize {{ passengerpoolsize }}"
+        backup: true
+      notify:
+        - Restart katello
+
+    - name: Set passenger other sizes
+      lineinfile:
+        path: /etc/httpd/conf.d/passenger.conf
+        insertafter: '<IfModule mod_passenger.c>'
+        regexp: "^   {{ item }}"
+        line: "   {{ item }}"
+        backup: true
+      with_items:
+        - PassengerMaxRequestQueueSize 200
+        - PassengerStatThrottleRate 120
+      notify:
+        - Restart katello
+
+    - name: Set some passenger ssl optimizations
+      lineinfile:
+        path: /etc/httpd/conf.d/05-foreman-ssl.conf
+        insertafter: '  PassengerAppRoot /usr/share/foreman'
+        regexp: "^  {{ item }}"
+        line: "  {{ item }}"
+        backup: true
+      with_items:
+        - PassengerMaxPreloaderIdleTime 0
+        - PassengerMaxRequests 10000
+
+    - name: Set puppet passenger optimizations
+      lineinfile:
+        path: /etc/httpd/conf.d/25-puppet.conf
+        insertafter: '<VirtualHost .*>'
+        regexp: "^   {{ item }}"
+        line: " {{ item }}"
+        backup: true
+      with_items:
+        - PassengerMaxPreloaderIdleTime 0
+        - PassengerMaxRequests 10000
+      when: puppet
+
+    - name: Set qrouterd nofile limit
+      ini_file:
+        path: /etc/systemd/system/qdrouterd.service.d/limits.conf
+        section: Service
+        option: LimitNOFILE
+        value: "{{ 3 * content_hosts_count + 100 }}"
+      notify:
+        - Reload systemd
+        - Restart katello
+
+
+  handlers:
+    - name: Reload systemd
+      shell: systemctl daemon-reload
+    - name: Restart katello
+      shell: katello-service restart
+    - name: Restart qpidd
+      service: name=qpidd state=restarted
+    - name: Restart postgresql
+      service: name=postgresql state=restarted
